@@ -1,1 +1,448 @@
+--checking full duplicates
+--USE DATAWAREHOUSE
 
+
+--
+
+CREATE OR ALTER PROCEDURE siLver.load_silver AS
+BEGIN
+	DECLARE @start_time DATETIME,@end_time DATETIME,@batch_start_time DATETIME,@batch_end_time DATETIME;
+	SET @batch_start_time=GETDATE();
+    BEGIN TRY
+		PRINT'=========================================='
+		PRINT 'LOADING SILVER LAYER';
+		PRINT '========================================='
+
+		PRINT '-----------------------------------------'
+		PRINT 'LOADING CRM TABLE'
+		PRINT '------------------------------------------'
+
+		
+	--1) TABLE CRM_CUST_INFO
+
+--CHECK FOR UNWANTED SPECS 
+--EXPECTATION :NO RESULT
+	SELECT cst_firstname
+	FROM silver.crm_cust_info
+	WHERE cst_firstname!=TRIM(cst_firstname)
+
+	--DATA STANDARDIZATION AND CONSISTENCY\
+	SELECT DISTINCT cst_gndr
+	FROM silver.crm_cust_info
+
+	--CHECKING FOR DUPLICATES OF PRIMARY KEY
+	SELECT 
+	cst_id,
+	COUNT(*)
+	FROM silver.crm_cust_info
+	GROUP BY cst_id
+	HAVING COUNT(*)>1 OR cst_id IS NULL
+
+	--DATA CLEANING AND TRSNFORMATION
+
+	--FINDING ONLY UNIQUE ROW OF RECENT DATE
+	--SELECT TOP(5) * FROM bronze.crm_cust_info
+	PRINT'>>TRUNCATING TABLE'
+	TRUNCATE TABLE silver.crm_cust_info;
+	PRINT '>>INSERING DATA INTO:SILVER.CRM_CUST_INFO';
+	SET @start_time=GETDATE();
+	INSERT INTO silver.crm_cust_info(
+		cst_id,
+		cst_key,
+		cst_firstname,
+		sct_lastname,
+		cst_material_status,
+		cst_gndr,
+		cst_create_date
+	)
+	SELECT 
+		cst_id,
+		cst_key,
+		TRIM(cst_firstname) AS cst_firstname,
+		TRIM(sct_lastname) AS sct_lastname,
+		CASE 
+			WHEN UPPER(TRIM(cst_material_status))='M' THEN 'MARRIED'
+			WHEN UPPER(TRIM(cst_material_status))='S' THEN 'SINGLE'
+			ELSE 'NA'
+		END cst_material_status,
+		CASE 
+			WHEN UPPER(TRIM(cst_gndr))='F' THEN 'FEMALE'
+			WHEN UPPER(TRIM(cst_gndr))='M' THEN 'MALE'
+			ELSE 'NA'
+		END cst_gndr,
+		cst_create_date
+	FROM (
+		SELECT *,
+			   ROW_NUMBER() OVER(PARTITION BY cst_id ORDER BY cst_create_date DESC) AS flag_last
+		FROM bronze.crm_cust_info
+	) t
+	WHERE flag_last = 1
+	AND NOT EXISTS (
+		SELECT 1 
+		FROM silver.crm_cust_info s
+		WHERE s.cst_id = t.cst_id
+	);
+		SET @end_time=GETDATE();
+		PRINT '>>LOAD DURATION :'+CAST(DATEDIFF(SECOND,@start_time,@end_time) AS NVARCHAR)+'SECONDS';
+
+
+	--2)TABLE CRM_PRS_INFO
+
+	--CHECK FOR UNWANTED SPECS 
+	--EXPECTATION :NO RESULT
+
+	SELECT 
+	prd_id,
+	COUNT(*)
+	FROM bronze.crm_prd_info
+	GROUP BY prd_id
+	HAVING COUNT(*)>1 OR prd_id IS NULL
+
+
+	PRINT'>>TRUNCATING TABLE crm_prd_info'
+	TRUNCATE TABLE silver.crm_prd_info;
+	PRINT '>>INSERING DATA INTO:SILVER.crm_prd_info';
+	--FILTERS OUT UNMATCHED DATA AFTER APPLYING TRANSFORMATION
+	SET @start_time=GETDATE();
+	INSERT INTO silver.crm_prd_info(
+		prd_id,
+		cat_id,
+		prd_key,
+		prd_nm,
+		prd_cost,
+		prd_line,
+		prd_start_dt,
+		prd_end_dt
+	)
+	SELECT
+	prd_id,
+	CAST(REPLACE(SUBSTRING(prd_key,1,5),'-','_')AS NVARCHAR)  AS cat_id,
+	SUBSTRING(prd_key,7,LEN(prd_key)) AS prd_key,
+	prd_nm,
+	ISNULL(prd_cost,0) AS prd_cost,
+	CASE UPPER(TRIM(prd_line))
+		 WHEN 'M' THEN 'MOUNTAIN'
+		 WHEN 'R' THEN 'ROAD'
+		 WHEN 'S' THEN 'OTHER SALES'
+		 WHEN 'T' THEN 'TOURING'
+		 ELSE 'NA'
+	END AS prd_line,
+	CAST(prd_start AS DATE) AS prd_start,
+	CAST(LEAD(prd_start) OVER (PARTITION BY prd_key ORDER BY prd_start)-1 AS DATE) AS prd_end
+	FROM bronze.crm_prd_info
+	--WHERE REPLACE(SUBSTRING(prd_key,1,5),'-','_') NOT IN
+	--(SELECT DISTINCT id FROM bronze.erm_px_cat_g1v2)
+	SET @end_time=GETDATE();
+	PRINT '>>LOAD DURATION :'+CAST(DATEDIFF(SECOND,@start_time,@end_time) AS NVARCHAR)+'SECONDS';
+
+	SELECT prd_nm
+	FROM bronze.crm_prd_info
+	WHERE prd_nm!=TRIM(prd_nm)
+
+	--check for negtive or null num,vber
+	SELECT prd_cost
+	FROM bronze.crm_prd_info
+	WHERE prd_cost<0 OR prd_cost IS NULL
+
+	--CHECKING IF START DATE IS GREATER THAN END DATE AS PRACTICALLY ISNOT POSSIBLE
+	SELECT prd_start,prd_end
+	FROM bronze.crm_prd_info
+	WHERE prd_start>prd_end
+
+	-- soln for it is end date= start date of next recordc -1
+
+	--aCHECKING IT FOR SILVER
+	SELECT prd_nm
+	FROM silver.crm_prd_info
+	WHERE prd_nm!=TRIM(prd_nm)
+
+	--check for negtive or null num,vber
+	SELECT prd_cost
+	FROM silver.crm_prd_info
+	WHERE prd_cost<0 OR prd_cost IS NULL
+
+	SELECT TOP (10)* FROM silver.crm_prd_info
+
+	--3)TABLE SOILVER CRM_SALES_DETAILS
+
+
+
+	--as we know  sls_prd_key and prd_key of crm_prd_info
+	SELECT 
+	sls_ord_num,
+	sls_prd_key,
+	sls_cust_id,
+	sls_order_dt,
+	sls_ship_dt,
+	sls_due_dt,
+	sls_sales,
+	sls_quantity,
+	sls_price
+	FROM bronze.crm_sales_details
+	WHERE sls_prd_key NOT IN (SELECT prd_key FROM silver.crm_prd_info)
+
+	--also check for cust_id and cst_id
+	SELECT 
+	sls_ord_num,
+	sls_prd_key,
+	sls_cust_id,
+	sls_order_dt,
+	sls_ship_dt,
+	sls_due_dt,
+	sls_sales,
+	sls_quantity,
+	sls_price
+	FROM bronze.crm_sales_details
+	WHERE sls_cust_id NOT IN (SELECT cst_id FROM silver.crm_cust_info)
+
+	--check for zero
+	SELECT sls_order_dt
+	FROM bronze.crm_sales_details
+	WHERE sls_order_dt<=0 OR LEN(sls_order_dt)!=8 or SLS_ORDER_DT>20500101
+
+	--CHECKING IF SALES=QUANTITY*PRICE,null zero negat
+	SELECT 
+	sls_sales AS OLD_SLS_SALES,
+	sls_quantity,
+	sls_price AS OLS_SALES_PRICE,
+	CASE WHEN sls_sales IS NULL OR sls_sales<=0 OR sls_sales!=sls_quantity*ABS(sls_price)
+			THEN sls_quantity*ABS(sls_price)
+		 ELSE sls_sales
+	END AS sls_sales,
+
+	CASE WHEN sls_price IS NULL OR sls_price<=0
+			THEN sls_sales/NULLIF(sls_quantity,0)
+			ELSE sls_price
+	END  AS sls_price
+	FROM bronze.crm_sales_details
+	WHERE sls_sales!=sls_quantity*sls_price OR sls_sales IS NULL OR
+	sls_quantity IS NULL OR
+	sls_price IS NULL 
+	OR sls_sales<=0 OR sls_quantity<=0 OR sls_price<=0
+	--conclusion:
+	--if sales is -ve,zero,null derive it using quant and price
+	--if price -=- calculate it using sales and quamtity
+	--if price is negative convert it into positive and then calculate it
+	PRINT'>>TRUNCATING TABLE crm_sales_details'
+	TRUNCATE TABLE silver.crm_sales_details;
+	PRINT '>>INSERING DATA INTO:SILVER.crm_sales_details'; 
+
+	SET @start_time=GETDATE();
+	INSERT INTO silver.crm_sales_details(
+		sls_ord_num,
+		sls_prd_key,
+		sls_cust_id,
+		sls_order_dt,
+		sls_ship_dt,
+		sls_due_dt,
+		sls_sales,
+		sls_quantity,
+		sls_price
+	)
+	SELECT 
+	sls_ord_num,
+	sls_prd_key,
+	sls_cust_id,
+	CASE WHEN sls_order_dt=0 OR LEN(sls_order_dt)!=8 THEN NULL
+		ELSE CAST(CAST(sls_order_dt AS VARCHAR) AS DATE)
+	END AS sls_order_dt,
+	CASE WHEN sls_ship_dt=0 OR LEN(sls_ship_dt)!=8 THEN NULL
+		ELSE CAST(CAST(sls_ship_dt AS VARCHAR) AS DATE)
+	END AS sls_ship_dt,
+	CASE WHEN sls_due_dt=0 OR LEN(sls_due_dt)!=8 THEN NULL
+		ELSE CAST(CAST(sls_due_dt AS VARCHAR) AS DATE)
+	END AS sls_due_dt,
+	CASE WHEN sls_sales IS NULL OR sls_sales<=0 OR sls_sales!=sls_quantity*ABS(sls_price)
+			THEN sls_quantity*ABS(sls_price)
+		 ELSE sls_sales
+	END AS sls_sales,
+	sls_quantity,
+	CASE WHEN sls_price IS NULL OR sls_price<=0
+			THEN sls_sales/NULLIF(sls_quantity,0)
+			ELSE sls_price
+	END  AS sls_price
+	FROM bronze.crm_sales_details
+
+	SET @end_time=GETDATE();
+		PRINT '>>LOAD DURATION :'+CAST(DATEDIFF(SECOND,@start_time,@end_time) AS NVARCHAR)+'SECONDS';
+	--#DONE CLEANING OF 3RD TABLE
+	--now check for silver table
+
+	SELECT 
+	sls_sales AS OLD_SLS_SALES,
+	sls_quantity,
+	sls_price AS OLS_SALES_PRICE
+	FROM silver.crm_sales_details
+	WHERE sls_sales!=sls_quantity*sls_price OR sls_sales IS NULL OR
+	sls_quantity IS NULL OR
+	sls_price IS NULL 
+	OR sls_sales<=0 OR sls_quantity<=0 OR sls_price<=0
+	--perfecto
+
+	---###########################################################################
+	--4)table bronze.erp_cust_az12
+
+	SELECT cid,bdate,gen FROM bronze.erm_cust_az12
+
+	SELECT * FROM silver.crm_cust_info;
+
+	SELECT cid,bdate,gen FROM bronze.erm_cust_az12
+	WHERE cid LIKE '%AW00011000%'
+
+	SELECT cid,
+	CASE WHEN cid LIKE 'NAS%' THEN SUBSTRING(cid,4,LEN(cid))
+		ELSE cid
+	END cid,
+	bdate,
+	gen FROM bronze.erm_cust_az12
+	WHERE CASE WHEN cid LIKE 'NAS%' THEN SUBSTRING(cid,4,LEN(cid))
+		ELSE cid
+	END NOT IN(SELECT DISTINCT cst_key FROM silver.crm_cust_info)
+
+	------------------------------------------------------
+	SELECT 
+	CASE WHEN cid LIKE 'NAS%' THEN SUBSTRING(cid,4,LEN(cid))
+		ELSE cid
+	END cid,
+	bdate,
+	gen FROM bronze.erm_cust_az12
+	WHERE CID NOT IN(SELECT DISTINCT cst_key FROM silver.crm_cust_info)
+	--------------------------------------------
+	------------------------------------------------------
+
+	SELECT 
+	bdate
+	FROM bronze.erm_cust_az12
+	WHERE bdate<'1924-01-01' OR bdate> GETDATE()
+
+	SELECT DISTINCT GEN ,
+	CASE WHEN UPPER(TRIM(GEN)) IN ('F','FEMALE') THEN 'Female'
+		WHEN UPPER(TRIM(GEN)) IN('M','MALE') THEN 'Male'
+		ELSE 'NA'
+	END AS gen
+	FROM BRONZE.erm_cust_az12
+
+	PRINT'>>TRUNCATING TABLE erm_cust_az12'
+	TRUNCATE TABLE silver.erm_cust_az12;
+	PRINT '>>INSERING DATA INTO:SILVER.erm_cust_az12'; 
+	SET @start_time=GETDATE();
+
+	INSERT INTO silver.erm_cust_az12(
+	cid,bdate,gen)
+	SELECT 
+	CASE WHEN cid LIKE 'NAS%' THEN SUBSTRING(cid,4,LEN(cid))
+		ELSE cid
+	END cid,
+	CASE WHEN bdate>GETDATE() THEN NULL
+		ELSE bdate
+	END AS bdate,
+	CASE WHEN UPPER(TRIM(GEN)) IN ('F','FEMALE') THEN 'Female'
+		WHEN UPPER(TRIM(GEN)) IN('M','MALE') THEN 'Male'
+		ELSE 'NA'
+	END AS gen
+	FROM bronze.erm_cust_az12
+		SET @end_time=GETDATE();
+		PRINT '>>LOAD DURATION :'+CAST(DATEDIFF(SECOND,@start_time,@end_time) AS NVARCHAR)+'SECONDS';
+	--check for silver
+	SELECT 
+	bdate
+	FROM silver.erm_cust_az12
+	WHERE bdate> GETDATE()
+
+	SELECT DISTINCT GEN 
+	FROM silver.erm_cust_az12
+
+	--#########################################################
+	--5)Table
+	SELECT * FROM bronze.erm_loc_a101;
+	SELECT 
+	cid,
+	cntry
+	FROM bronze.erm_loc_a101;
+
+	SELECT 
+	REPLACE(cid,'-','') cid,
+	cntry
+	FROM bronze.erm_loc_a101 WHERE cid NOT IN
+	(SELECT cst_key FROM silver.crm_cust_info)
+
+	--DATA STANDARDIZATION AND CONSISTENCY
+	SELECT DISTINCT cntry 
+	FROM bronze.erm_loc_a101
+	ORDER BY cntry
+
+	SELECT 
+	REPLACE(cid,'-','') cid,
+	cntry
+	FROM bronze.erm_loc_a101
+
+	PRINT'>>TRUNCATING TABLE erm_loc_a101'
+	TRUNCATE TABLE silver.erm_loc_a101;
+	PRINT '>>INSERING DATA INTO:SILVER.erm_loc_a101'; 
+	SET @start_time=GETDATE();
+	INSERT INTO silver.erm_loc_a101(
+		cid,
+		cntry)
+	SELECT 
+	REPLACE(cid,'-','') cid,
+	CASE 
+		WHEN TRIM(cntry) = 'DE' THEN 'Germany'
+		WHEN TRIM(cntry) IN ('US','USA') THEN 'United States'
+		WHEN TRIM(cntry) = '' OR cntry IS NULL THEN 'United States'
+		ELSE TRIM(cntry)
+	END AS cntry
+	FROM bronze.erm_loc_a101
+
+	SET @end_time=GETDATE();
+		PRINT '>>LOAD DURATION :'+CAST(DATEDIFF(SECOND,@start_time,@end_time) AS NVARCHAR)+'SECONDS';
+
+	SELECT 
+	 cid,
+	cntry
+	FROM silver.erm_loc_a101
+
+	--##################################################################
+	--6) table 
+	SELECT TOP(5)*  FROM bronze.erm_px_cat_g1v2
+	SELECT TOP(5)* FROM bronze.crm_prd_info
+
+	SELECT distinct id  FROM bronze.erm_px_cat_g1v2
+	SELECT distinct prd_key FROM bronze.crm_prd_info ORDER BY prd_key
+
+
+	--CHECK FOR UNWANTED SPACES
+	SELECT * FROM BRONZE.erm_px_cat_g1v2
+	where CAT!=TRIM(cat) OR subcat!=TRIM(subcat) OR maintenance!=TRIM(maintenance)
+
+	PRINT'>>TRUNCATING TABLE erm_px_cat_g1v2'
+	TRUNCATE TABLE silver.erm_px_cat_g1v2;
+	PRINT '>>INSERING DATA INTO:SILVER.erm_px_cat_g1v2';
+
+	SET @start_time=GETDATE();
+	INSERT INTO silver.erm_px_cat_g1v2(
+	id,cat,subcat,maintenance)
+	SELECT 
+	id,cat,subcat,maintenance
+	FROM bronze.erm_px_cat_g1v2
+
+	SET @end_time=GETDATE();
+	PRINT '>>LOAD DURATION :'+CAST(DATEDIFF(SECOND,@start_time,@end_time) AS NVARCHAR)+'SECONDS';
+
+	--CHECK FOR UNWANTED SPACES
+	SELECT * FROM silver.erm_px_cat_g1v2
+	where CAT!=TRIM(cat) OR subcat!=TRIM(subcat) OR maintenance!=TRIM(maintenance);
+	END TRY
+	BEGIN CATCH 
+		PRINT '===============================================';
+		PRINT 'ERROR OCUURED DURING BRONZE LAYER'
+		PRINT 'ERROR MESSAGE' +ERROR_MESSAGE();
+		PRINT 'ERROR MESSAGE' +CAST(ERROR_NUMBER() AS NVARCHAR);
+		PRINT 'ERROR MESSAGE' +CAST(ERROR_STATE() AS NVARCHAR);
+		PRINT '================================================';
+	END CATCH
+	SET @batch_end_time=GETDATE();
+	PRINT '>>LOAD DURATION :'+CAST(DATEDIFF(SECOND,@batch_start_time,@batch_end_time) AS NVARCHAR)+'SECONDS';
+
+END
+
+EXEC silver.load_silver;
