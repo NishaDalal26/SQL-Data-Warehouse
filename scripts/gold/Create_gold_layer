@@ -1,1 +1,180 @@
+USE DATAWAREHOUSE;
+SELECT * FROM silver.crm_cust_info;
+ --ci is master table and we are using left join as we dont want top mis  anything by doing imnmner join
 
+SELECT cst_id,COUNT(*) FROM(
+SELECT 
+	ci.cst_id,
+	ci.cst_key,
+	ci.cst_firstname,
+	ci.sct_lastname,
+	ci.cst_material_status,
+	ci.cst_gndr,
+    ci.cst_create_date,
+	ca.bdate,
+	ca.gen,
+	la.cntry
+FROM silver.crm_cust_info ci
+LEFT JOIN silver.erm_cust_az12 ca
+ON ci.cst_key=ca.cid
+LEFT JOIN silver.erm_loc_a101 la
+ON ci.cst_key=la.cid)t GROUP BY CST_ID
+HAVING COUNT(*)>1
+
+--cHECVKING FOR DUPLICATES 
+SELECT cst_id,COUNT(*) 
+FROM(
+	SELECT 
+		ci.cst_id ,
+		ci.cst_key ,
+		ci.cst_firstname,
+		ci.sct_lastname ,
+		ci.cst_material_status ,
+		ci.cst_gndr ,
+		ci.cst_create_date,
+		ca.bdate,
+		ca.gen,
+		la.cntry
+	FROM silver.crm_cust_info ci
+	LEFT JOIN silver.erm_cust_az12 ca
+	ON ci.cst_key=ca.cid
+	LEFT JOIN silver.erm_loc_a101 la
+	ON ci.cst_key=la.cid)t 
+GROUP BY CST_ID
+HAVING COUNT(*)>1
+
+
+--RECONSTRUCTING GEMNDER COLM AGAIN 
+
+SELECT 
+	ci.cst_id AS customer_id,
+	ci.cst_key as customer_mumber,
+	ci.cst_firstname as firstname,
+	ci.sct_lastname as lastname,
+	ci.cst_material_status as marital_status,
+	CASE WHEN ci.cst_gndr!='NA' THEN ci.cst_gndr
+	ELSE COALESCE(ca.gen,'NA')
+	END gender,
+	
+    ci.cst_create_date as create_date,
+	ca.bdate as birthday,
+	la.cntry as coountry
+FROM silver.crm_cust_info ci
+LEFT JOIN silver.erm_cust_az12 ca
+ON ci.cst_key=ca.cid
+LEFT JOIN silver.erm_loc_a101 la
+ON ci.cst_key=la.cid
+
+--generating surrogate key
+CREATE VIEW gold.dim_customers AS
+SELECT 
+    ROW_NUMBER() OVER (ORDER BY cst_id) AS customer_key,
+	ci.cst_id AS customer_id,
+	ci.cst_key as customer_mumber,
+	ci.cst_firstname as firstname,
+	ci.sct_lastname as lastname,
+	ci.cst_material_status as marital_status,
+	CASE WHEN ci.cst_gndr!='NA' THEN ci.cst_gndr
+	ELSE COALESCE(ca.gen,'NA')
+	END gender,
+	
+    ci.cst_create_date as create_date,
+	ca.bdate as birthday,
+	la.cntry as coountry
+FROM silver.crm_cust_info ci
+LEFT JOIN silver.erm_cust_az12 ca
+ON ci.cst_key=ca.cid
+LEFT JOIN silver.erm_loc_a101 la
+ON ci.cst_key=la.cid
+
+SELECT distinct gender  FROM gold.dim_customers
+
+--CREATE DIMENSION PRODUCTS
+--CRM AND ERP SOURCE SYSTEM IS CRM
+
+SELECT pn.prd_id,
+	pn.cat_id,
+	pn.prd_key,
+	pn.prd_cost,
+	pn.prd_line,
+	pn.prd_start_dt,
+	pn.prd_end_dt
+FROM silver.crm_prd_info pn
+
+
+SELECT pn.prd_id,
+	pn.cat_id,
+	pn.prd_key,
+	pn.prd_cost,
+	pn.prd_line,
+	pn.prd_start_dt,
+	pn.prd_end_dt,
+	pc.cat,
+	pc.subcat,
+	pc.maintenance
+FROM silver.crm_prd_info pn
+LEFT JOIN silver.erm_px_cat_g1v2 pc
+ON pn.cat_id=pc.id
+WHERE prd_end_dt IS NULL --filter out historical data
+
+SELECT TOP(10)* FROM silver.erm_px_cat_g1v2
+
+SELECT prd_key,COUNT(*) FROM(
+SELECT pn.prd_id,
+	pn.cat_id,
+	pn.prd_key,
+	pn.prd_cost,
+	pn.prd_line,
+	pn.prd_start_dt,
+	pn.prd_end_dt,
+	pc.cat,
+	pc.subcat,
+	pc.maintenance
+FROM silver.crm_prd_info pn
+LEFT JOIN silver.erm_px_cat_g1v2 pc
+ON pn.cat_id=pc.id
+WHERE prd_end_dt IS NULL --filter out historical daTA
+)t GROUP BY prd_key
+HAVING COUNT(*)>1
+
+--GIVING FREIBNDLY NAME
+CREATE VIEW gold.dim_products AS
+SELECT 
+	ROW_NUMBER() OVER(ORDER BY pn.prd_start_dt,pn.prd_key) AS product_key,
+	pn.prd_id as product_id,
+	pn.cat_id as category_id,
+	pn.prd_key as product_num,
+	pn.prd_cost as cost,
+	pn.prd_line as product_line,
+	pn.prd_start_dt as start_date,
+	pn.prd_end_dt as end_date,
+	pc.cat as category,
+	pc.subcat as subcategory,
+	pc.maintenance
+FROM silver.crm_prd_info pn
+LEFT JOIN silver.erm_px_cat_g1v2 pc
+ON pn.cat_id=pc.id
+WHERE prd_end_dt IS NULL 
+
+SELECT * FROM gold.dim_products
+
+--CREATE FACT SALES
+CREATE VIEW gold.fact_sales AS
+SELECT 
+    sd.sls_ord_num as order_number,
+    sd.sls_prd_key ,
+    sd.sls_cust_id,
+    sd.sls_order_dt,
+    sd.sls_ship_dt,
+    sd.sls_due_dt,
+    sd.sls_sales as sales_amount,
+    sd.sls_quantity,
+    sd.sls_price
+FROM silver.crm_sales_details sd
+LEFT JOIN gold.dim_products pr
+ON sd.sls_prd_key=pr.product_num
+LEFT JOIN gold.dim_customers cu
+ON sd.sls_cust_id=cu.customer_id
+
+SELECT * FROM gold.fact_sales
+LEFT JOIN 
